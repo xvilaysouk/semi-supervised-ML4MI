@@ -1,0 +1,239 @@
+---
+title: "semi-supervised-ML4MI Repository \U0001F916"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is the repository of Semi-supervised machine learning classification framework for material intensity parameters of residential buildings.
+
+Citation : Preprint -->> Vilaysouk, Xaysackda & Saypadith, Savath & Hashimoto, Seiji. (2020). Semi-supervised machine learning classification framework for material intensity parameters of residential buildings. DOI:10.13140/RG.2.2.16267.11048.
+
+```{r, error=FALSE , warning=FALSE}
+library(readxl)
+library(ggplot2)
+library(tidyverse)
+library(gridExtra)
+library(plotly)
+library(reshape2)
+library(factoextra)
+library(NbClust)
+library(cluster)
+library(mclust)
+library(ggpubr)
+```
+
+Pre-processing Dataset
+```{r, error=FALSE , warning=FALSE}
+data_mod <- read_csv("./MI.v2.csv") %>% filter(Occupation == "residential") %>%
+  filter(total >100) ## @ filter only residential building
+
+# select main material categories
+data_selected <- data_mod %>% dplyr::select (metal_based,biomass_based,cca,other_construction_materials, total)
+
+#adjust NA value as mean value
+for(i in 1:5){
+  data_selected[is.na(data_selected[,i]), i] <- mean(as.matrix(na.omit(data_selected[,i])))
+}
+
+#adjust dataset scale for k-mean
+data_for_kmean <- scale(data_selected)
+head(data_for_kmean)
+```
+
+Find optimal k using traditional approaches 
+```{r}
+#Elbow Method
+fviz_nbclust(data_for_kmean ,kmeans, method = "wss") + ggtitle("Optimal number for k of the MI parameters")
+
+#Silhouette Method
+fviz_nbclust(data_for_kmean ,kmeans, method = "silhouette") + ggtitle("Optimal number for k of the MI parameters silhouette")
+
+set.seed(123)
+gap_stat <- clusGap(data_for_kmean, FUN = kmeans, nstart = 25,
+                    K.max = 10, B = 50)
+#Gap Statistic Method
+fviz_gap_stat(gap_stat)
+```
+
+Find the optimal number of k by comparing other indexes using NbClust package
+```{r}
+res.nbclust <- NbClust(data_for_kmean, distance = "euclidean",
+                  min.nc = 2, max.nc = 10, 
+                  method = "kmeans", index ="all")
+factoextra::fviz_nbclust(res.nbclust) + theme_minimal() + ggtitle("NbClust's optimal number of clusters")
+```
+
+Un-supervised Machine Learning models for different k value
+```{r}
+## run for difference k value ##
+set.seed(1)
+k4 <- kmeans(data_for_kmean, 4, nstart = 30) ## k = 4
+set.seed(1)
+k5 <- kmeans(data_for_kmean, 5, nstart = 30) ## k = 5
+set.seed(1)
+k6 <- kmeans(data_for_kmean, 6, nstart = 30) ## k = 6
+set.seed(1)
+k7 <- kmeans(data_for_kmean, 7, nstart = 30) ## k = 7
+
+## plot clustering result in 2 dimensions using PCA to reduce number of dimention ##
+p1 <- fviz_cluster(k4, geom = "point" , data_for_kmean) + ggtitle("k=4")
+p2 <- fviz_cluster(k5, geom = "point" , data_for_kmean) + ggtitle("k=5")
+p3 <- fviz_cluster(k6, geom = "point" , data_for_kmean) + ggtitle("k=6")
+p4 <- fviz_cluster(k7, geom = "point" , data_for_kmean) + ggtitle("k=7") 
+p1
+p2
+p3
+p4
+
+```
+Create new dataset for un-supervised machine learning model
+```{r}
+data_trained <- cbind(data_mod, cluster = k7$cluster) 
+data_trained$label <- toupper(data_trained$label)
+```
+
+
+Install for first time
+```{r}
+# install.packages('e1071', dependencies=TRUE)
+```
+
+Libraries for Supervised ML part
+```{r warning=FALSE}
+library(party)
+library(ggparty)
+library(caret)
+```
+
+
+```{r warning=FALSE}
+boxPlotMI <- data_trained %>% dplyr::select(Metal = metal_based, Biomass = biomass_based, CCA = cca, Brick = other_construction_materials,cluster,Total = total) %>% melt(id="cluster") %>% ggplot( aes(x = variable, y = value)) + geom_boxplot(aes(color = as.factor(cluster), fill = as.factor(cluster), alpha = 0.7),width = 0.3) + facet_wrap( ~ cluster, scales = "free") + labs(x = "", y = "MI: Material Intensity (kg/m²)") + guides(alpha = F, fill = F, color = F) + theme(axis.text=element_text(size=12), axis.title=element_text(size=14,face="bold")) 
+
+simNo = Sys.Date()
+#tiff(filename = paste("./plot/boxplotK7",simNo,".tiff"), width = 900, height = 900)
+boxPlotMI
+#dev.off()
+```
+Supervised Machine Learning Model
+```{r warning=FALSE}
+DT = data_trained 
+
+# Save csv file for trained dataset with Cluster number 
+#write.csv(DT, file = paste0("./",gsub(" ","",Sys.time()),"data_trained.csv"))
+
+# Ignore Cluster 1 and Cluster 5 due to small number of samples
+DT <-  DT %>% dplyr::filter(cluster != 5)
+DT <-  DT %>% dplyr::filter(cluster != 1)
+
+dt <- DT %>% dplyr::select(BDType  = building_type, BDMat = label, cluster, year = construction_period_start, Region = global_region, No_Floors = no_floors)
+
+
+# Define building type
+dt$BDType[is.na(dt$BDType)] <- "Type.NA"
+dt$BDType[dt$BDType == "SFH, MFH"] <- "TypeMix"
+
+# Define number of floor category
+dt$No_Floors[is.na(dt$No_Floors)] <- "FlNA"
+dt$No_Floors[dt$No_Floors >= 4] <- "FlH"
+dt$No_Floors[dt$No_Floors < 4] <- "FlL"
+
+# Define Material category for data points that not consist any information
+dt$BDMat[is.na(dt$BDMat)] <- "MatNA"
+
+
+# Define clusters based on main material information from k-mean interpretation 
+dt$BDMat[dt$cluster == 2] <- "W"
+dt$BDMat[dt$cluster == 3] <- "B"
+dt$BDMat[dt$cluster == 4] <- "C"
+dt$BDMat[dt$cluster == 6] <- "B-C"
+dt$BDMat[dt$cluster == 7] <- "C"
+
+#Set the interval for constrction period
+dt$year[dt$year < 1901] <- "1870-1900"
+dt$year[dt$year > 1900 | dt$year < 1931] <- "1901-1930"
+dt$year[dt$year > 1930 | dt$year < 1961] <- "1931-1960"
+dt$year[dt$year > 1960 | dt$year < 1991] <- "1961-1990"
+dt$year[dt$year > 1990 | dt$year < 2011] <- "1991-2010"
+
+#Shorten Variables names
+dt$Region[dt$Region == "South_and_Southeast_Asia"] <- "SA"
+dt$Region[dt$Region == "East_Asia"] <- "EA"
+dt$Region[dt$Region == "Europe"] <- "EU"
+dt$Region[dt$Region == "North_America"] <- "NAm"
+dt$Region[dt$Region == "South_America"] <- "SAm"
+dt$Region[dt$Region == "SIDS"] <- "SIs"
+
+dt$Region <- paste("(",dt$Region, ")", sep = "")
+dt$BDMat <- paste("(",dt$BDMat, ")", sep = "")
+dt$BDType <- paste("(",dt$BDType, ")", sep = "")
+
+
+#embedded C for Cluster
+for (i in 1:7) {
+  dt$cluster[dt$cluster == i] <- paste("C",i, sep = "")
+}
+
+#change data type to be factor type
+for (i in 1:length(dt)) {
+  dt[,i] <- as.factor(dt[,i])
+}
+
+# Split dataset for train set and test set
+set.seed(1234)
+ind <- sample(2, nrow(dt), replace = TRUE, prob = c(0.7,0.3)) #70% #30%
+
+trainDT <- dt[ind==1,]
+testDT <- dt[ind==2,]
+
+```
+
+```{r}
+dtree <- ctree(cluster ~ ., data = trainDT)
+
+#Plot Decision tree
+t <- ggparty(dtree) +
+  geom_edge(aes(col = factor(id)), guides(color = F)) +
+  geom_edge_label(aes(col = factor(id))) +
+  geom_node_label(aes(col = factor(id)),
+    line_list = list(
+      aes(label = splitvar),
+      aes(label = paste("N =", nodesize))
+    ),
+    line_gpar = list(
+      list(size = 12),
+      list(size = 12)
+    ),
+    ids = "inner"
+  ) +
+  geom_node_label(aes(label = paste0("Node ", id, ", N = ", nodesize), col = factor(id)),
+    ids = "terminal", nudge_y = 0.015, nudge_x = .02,
+  ) +
+  geom_node_plot(
+    shared_legend = TRUE,
+    gglist = list(geom_bar(aes(x = cluster,fill = cluster)),
+                        xlab(""), ylab(""),
+                  theme(legend.position = "none")),
+  )+ theme(legend.position = "none")
+t
+```
+
+
+The confusion matrix
+```{r}
+conFusm <- confusionMatrix(predict(dtree, testDT),testDT$cluster,dnn = c("Prediction", "Actual"))
+conFusm
+```
+
+Plot of Confusion Matrix
+```{r}
+ggplot(as.data.frame(conFusm$table), aes(Prediction,sort(Actual,decreasing = T), fill= Freq)) +
+  geom_tile() + geom_text(aes(label=Freq)) +
+  scale_fill_gradient(low="white", high="blue") +
+  labs(x = "Actual Clusters",y = "Prediction Clusters") +
+  scale_x_discrete(labels=c("C2","C3","C4", "C6", "C7")) +
+  scale_y_discrete(labels=c("C7","C6","C4", "C3", "C2"))
+
+```
+
+
